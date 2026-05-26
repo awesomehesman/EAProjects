@@ -25,6 +25,11 @@ input bool   EnableSoundAlert           = true;
 input string SoundFile                  = "alert.wav";
 input bool   ScanOnlyCurrentChartSymbol = true;
 input string SymbolsToScan              = "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,XAUUSD";
+input bool   ApplyCleanChartTheme       = true;
+input color  BullishCandleColor         = clrLime;
+input color  BearishCandleColor         = clrRed;
+input color  ChartBackgroundColor       = clrBlack;
+input color  ChartForegroundColor       = clrWhite;
 
 string EA_NAME = "stayTRU Trend Continuation Framework";
 
@@ -72,6 +77,7 @@ datetime g_lastScannedCandleTimes[];
 int OnInit()
 {
    LoadSymbolsToScan();
+   ApplyChartTheme();
    Print(EA_NAME, " v1.1 initialized. ALERT-ONLY mode. Symbols loaded: ", ArraySize(g_symbols));
    return(INIT_SUCCEEDED);
 }
@@ -80,6 +86,27 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    Print(EA_NAME, " deinitialized. Reason: ", reason);
+}
+
+// Applies a clean candlestick chart theme for live charts and visual tester.
+void ApplyChartTheme()
+{
+   if(!ApplyCleanChartTheme)
+      return;
+
+   ChartSetInteger(0, CHART_MODE, CHART_CANDLES);
+   ChartSetInteger(0, CHART_SHOW_GRID, false);
+   ChartSetInteger(0, CHART_COLOR_BACKGROUND, ChartBackgroundColor);
+   ChartSetInteger(0, CHART_COLOR_FOREGROUND, ChartForegroundColor);
+   ChartSetInteger(0, CHART_COLOR_GRID, ChartBackgroundColor);
+   ChartSetInteger(0, CHART_COLOR_CHART_UP, BullishCandleColor);
+   ChartSetInteger(0, CHART_COLOR_CHART_DOWN, BearishCandleColor);
+   ChartSetInteger(0, CHART_COLOR_CANDLE_BULL, BullishCandleColor);
+   ChartSetInteger(0, CHART_COLOR_CANDLE_BEAR, BearishCandleColor);
+   ChartSetInteger(0, CHART_COLOR_CHART_LINE, BullishCandleColor);
+   ChartSetInteger(0, CHART_COLOR_BID, ChartForegroundColor);
+   ChartSetInteger(0, CHART_COLOR_ASK, clrTomato);
+   ChartRedraw(0);
 }
 
 // Scans the active chart symbol or configured symbol list on each tick.
