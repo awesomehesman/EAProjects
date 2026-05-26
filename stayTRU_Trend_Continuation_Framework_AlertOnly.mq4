@@ -1,14 +1,18 @@
 #property strict
 #property copyright "stayTRU"
 #property link      ""
-#property version   "1.00"
-#property description "stayTRU Trend Continuation Framework - Version 1.0 Alert Only"
+#property version   "1.10"
+#property description "stayTRU Trend Continuation Framework - Version 1.1 Alert Only"
 
 input bool   UseSessionFilter           = true;
 input int    StartHour                  = 9;
 input int    EndHour                    = 18;
+input int    ServerToSASTOffsetHours    = 0;
 input int    SwingLookback              = 3;
 input int    TrendSwingCount            = 3;
+input bool   H4RequireConfirmedPullbackSwing = true;
+input double H4MinPullbackPips          = 10.0;
+input double H4MinPullbackPipsGold      = 100.0;
 input double MaxSpreadPips              = 3.0;
 input double MaxSpreadPipsGold          = 50.0;
 input double StopBufferPips             = 5.0;
@@ -49,6 +53,8 @@ struct LevelInfo
 {
    bool valid;
    string reason;
+   double triggerLevel;
+   double marketPrice;
    double entry;
    double stopLoss;
    double takeProfit;
@@ -60,12 +66,13 @@ struct LevelInfo
 string   g_symbols[];
 datetime g_lastBuyAlertTimes[];
 datetime g_lastSellAlertTimes[];
+datetime g_lastScannedCandleTimes[];
 
 // Initializes the symbol list and alert state.
 int OnInit()
 {
    LoadSymbolsToScan();
-   Print(EA_NAME, " v1.0 initialized. ALERT-ONLY mode. Symbols loaded: ", ArraySize(g_symbols));
+   Print(EA_NAME, " v1.1 initialized. ALERT-ONLY mode. Symbols loaded: ", ArraySize(g_symbols));
    return(INIT_SUCCEEDED);
 }
 
@@ -79,10 +86,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(UseSessionFilter && !IsWithinTradingSession())
-   {
-      Print(EA_NAME, " | Session filter active | Current server hour outside ", StartHour, ":00-", EndHour, ":00");
       return;
-   }
 
    if(ScanOnlyCurrentChartSymbol)
       ScanSymbol(Symbol());
@@ -112,20 +116,22 @@ void LoadSymbolsToScan()
       {
          string item = TrimString(parts[i]);
          if(item == "")
-            continue;
+         continue;
 
          int size = ArraySize(g_symbols);
          ArrayResize(g_symbols, size + 1);
-         g_symbols[size] = item;
+         g_symbols[size] = ResolveBrokerSymbol(item);
       }
    }
 
    ArrayResize(g_lastBuyAlertTimes, ArraySize(g_symbols));
    ArrayResize(g_lastSellAlertTimes, ArraySize(g_symbols));
+   ArrayResize(g_lastScannedCandleTimes, ArraySize(g_symbols));
    for(int j = 0; j < ArraySize(g_symbols); j++)
    {
       g_lastBuyAlertTimes[j] = 0;
       g_lastSellAlertTimes[j] = 0;
+      g_lastScannedCandleTimes[j] = 0;
    }
 }
 
@@ -149,6 +155,9 @@ void ScanSymbol(string symbol)
       LogSetupStatus(symbol, "INIT", "REJECTED", "No entry timeframe data available.");
       return;
    }
+
+   if(!ShouldScanNewCandle(symbol, entryCandleTime))
+      return;
 
    double spread = GetSpreadPips(symbol);
    double allowedSpread = IsGoldSymbol(symbol) ? MaxSpreadPipsGold : MaxSpreadPips;
@@ -194,7 +203,8 @@ void ProcessBuySetup(string symbol, int entryTf, datetime candleTime, TrendInfo 
    }
 
    LevelInfo levels;
-   CalculateSuggestedLevels(symbol, OP_BUY, breakLevel, pullback.swingLow, levels);
+   double marketPrice = GetAlertMarketPrice(symbol, OP_BUY);
+   CalculateSuggestedLevels(symbol, OP_BUY, breakLevel, marketPrice, pullback.swingLow, levels);
    if(!levels.valid)
    {
       LogSetupStatus(symbol, "LEVELS BUY", "REJECTED", levels.reason);
@@ -226,7 +236,8 @@ void ProcessSellSetup(string symbol, int entryTf, datetime candleTime, TrendInfo
    }
 
    LevelInfo levels;
-   CalculateSuggestedLevels(symbol, OP_SELL, breakLevel, pullback.swingHigh, levels);
+   double marketPrice = GetAlertMarketPrice(symbol, OP_SELL);
+   CalculateSuggestedLevels(symbol, OP_SELL, breakLevel, marketPrice, pullback.swingHigh, levels);
    if(!levels.valid)
    {
       LogSetupStatus(symbol, "LEVELS SELL", "REJECTED", levels.reason);
@@ -245,10 +256,11 @@ void ProcessSellSetup(string symbol, int entryTf, datetime candleTime, TrendInfo
    LogSetupStatus(symbol, "ALERT SELL", "SENT", "Structure break below " + DoubleToString(breakLevel, DigitsForSymbol(symbol)));
 }
 
-// Checks the server-time trading session.
+// Checks the configured SAST trading session using a broker-server offset.
 bool IsWithinTradingSession()
 {
-   int hour = TimeHour(TimeCurrent());
+   datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
+   int hour = TimeHour(sastTime);
 
    if(StartHour == EndHour)
       return(true);
@@ -439,8 +451,8 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
    int highShifts[];
    int lowShifts[];
 
-   int highCount = GetRecentSwingHighs(symbol, PERIOD_H4, 2, highs, highShifts);
-   int lowCount = GetRecentSwingLows(symbol, PERIOD_H4, 2, lows, lowShifts);
+   int highCount = GetRecentSwingHighs(symbol, PERIOD_H4, 3, highs, highShifts);
+   int lowCount = GetRecentSwingLows(symbol, PERIOD_H4, 3, lows, lowShifts);
 
    if(highCount < 1 || lowCount < 1)
    {
@@ -457,13 +469,27 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
 
    if(trend.direction > 0)
    {
-      pullback.protectedLevel = MathMax(trend.latestLow, lows[0]);
+      double priorH4SwingLow = (lowCount >= 2) ? lows[1] : lows[0];
+      pullback.protectedLevel = MathMax(trend.latestLow, priorH4SwingLow);
       bool bullishRetracedFromHigh = (closeNow < highs[0]);
+      bool bullishConfirmedSwing = (!H4RequireConfirmedPullbackSwing || lowShifts[0] < highShifts[0]);
+      double bullishPullbackPips = (highs[0] - lows[0]) / PipSize(symbol);
+      double minPullbackPips = IsGoldSymbol(symbol) ? H4MinPullbackPipsGold : H4MinPullbackPips;
       bool bullishBrokeStructure = (lowNow <= pullback.protectedLevel || iClose(symbol, PERIOD_H4, 1) <= pullback.protectedLevel);
 
       if(!bullishRetracedFromHigh)
       {
          pullback.reason = "Bullish trend, but H4 has not retraced from latest swing high.";
+         return;
+      }
+      if(!bullishConfirmedSwing)
+      {
+         pullback.reason = "Bullish trend, but no confirmed H4 pullback swing low after the swing high.";
+         return;
+      }
+      if(bullishPullbackPips < minPullbackPips)
+      {
+         pullback.reason = "Bullish H4 pullback is too shallow: " + DoubleToString(bullishPullbackPips, 1) + " pips.";
          return;
       }
       if(bullishBrokeStructure)
@@ -479,13 +505,27 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
 
    if(trend.direction < 0)
    {
-      pullback.protectedLevel = MathMin(trend.latestHigh, highs[0]);
+      double priorH4SwingHigh = (highCount >= 2) ? highs[1] : highs[0];
+      pullback.protectedLevel = MathMin(trend.latestHigh, priorH4SwingHigh);
       bool bearishRetracedFromLow = (closeNow > lows[0]);
+      bool bearishConfirmedSwing = (!H4RequireConfirmedPullbackSwing || highShifts[0] < lowShifts[0]);
+      double bearishPullbackPips = (highs[0] - lows[0]) / PipSize(symbol);
+      double minBearishPullbackPips = IsGoldSymbol(symbol) ? H4MinPullbackPipsGold : H4MinPullbackPips;
       bool bearishBrokeStructure = (highNow >= pullback.protectedLevel || iClose(symbol, PERIOD_H4, 1) >= pullback.protectedLevel);
 
       if(!bearishRetracedFromLow)
       {
          pullback.reason = "Bearish trend, but H4 has not retraced from latest swing low.";
+         return;
+      }
+      if(!bearishConfirmedSwing)
+      {
+         pullback.reason = "Bearish trend, but no confirmed H4 pullback swing high after the swing low.";
+         return;
+      }
+      if(bearishPullbackPips < minBearishPullbackPips)
+      {
+         pullback.reason = "Bearish H4 pullback is too shallow: " + DoubleToString(bearishPullbackPips, 1) + " pips.";
          return;
       }
       if(bearishBrokeStructure)
@@ -563,24 +603,26 @@ bool DetectBearishStructureBreak(string symbol, int timeframe, double &breakLeve
    return(false);
 }
 
-// Calculates alert-only entry, stop loss, take profit, and reward:risk levels.
-void CalculateSuggestedLevels(string symbol, int orderType, double entryLevel, double stopReference, LevelInfo &levels)
+// Calculates alert-only trigger, market entry, stop loss, take profit, and reward:risk levels.
+void CalculateSuggestedLevels(string symbol, int orderType, double triggerLevel, double marketPrice, double stopReference, LevelInfo &levels)
 {
    int digits = DigitsForSymbol(symbol);
    double buffer = (IsGoldSymbol(symbol) ? StopBufferPipsGold : StopBufferPips) * PipSize(symbol);
 
    levels.valid = false;
    levels.reason = "";
-   levels.entry = NormalizeDouble(entryLevel, digits);
+   levels.triggerLevel = NormalizeDouble(triggerLevel, digits);
+   levels.marketPrice = NormalizeDouble(marketPrice, digits);
+   levels.entry = NormalizeDouble(marketPrice, digits);
    levels.stopLoss = 0.0;
    levels.takeProfit = 0.0;
    levels.risk = 0.0;
    levels.reward = 0.0;
    levels.rewardRisk = 0.0;
 
-   if(stopReference <= 0.0 || entryLevel <= 0.0)
+   if(stopReference <= 0.0 || triggerLevel <= 0.0 || marketPrice <= 0.0)
    {
-      levels.reason = "Stop loss or entry reference could not be calculated.";
+      levels.reason = "Stop loss, trigger, or market price reference could not be calculated.";
       return;
    }
 
@@ -653,20 +695,49 @@ void SetLastAlertTime(string symbol, int orderType, datetime candleTime)
       g_lastSellAlertTimes[index] = candleTime;
 }
 
+// Allows scanner work and logging only once per new entry timeframe candle.
+bool ShouldScanNewCandle(string symbol, datetime candleTime)
+{
+   int index = GetSymbolIndex(symbol);
+   if(index < 0)
+      return(false);
+
+   if(g_lastScannedCandleTimes[index] == candleTime)
+      return(false);
+
+   g_lastScannedCandleTimes[index] = candleTime;
+   return(true);
+}
+
+// Returns the actual alert-time market price for the direction.
+double GetAlertMarketPrice(string symbol, int orderType)
+{
+   if(orderType == OP_BUY)
+      return(MarketInfo(symbol, MODE_ASK));
+   if(orderType == OP_SELL)
+      return(MarketInfo(symbol, MODE_BID));
+   return(0.0);
+}
+
 // Sends configured alert channels.
 void SendSetupAlert(string symbol, string direction, string trendDirection, string entryTf, LevelInfo &levels)
 {
-   string message = EA_NAME + " v1.0 ALERT-ONLY\n"
+   int digits = DigitsForSymbol(symbol);
+   datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
+   string message = EA_NAME + " v1.1 ALERT-ONLY\n"
       + "Symbol: " + symbol + "\n"
       + "Setup type: " + direction + "\n"
       + "Daily trend direction: " + trendDirection + "\n"
       + "H4 pullback valid: Yes\n"
       + "Entry timeframe used: " + entryTf + "\n"
-      + "Entry price: " + DoubleToString(levels.entry, DigitsForSymbol(symbol)) + "\n"
-      + "Suggested stop loss: " + DoubleToString(levels.stopLoss, DigitsForSymbol(symbol)) + "\n"
-      + "Suggested take profit: " + DoubleToString(levels.takeProfit, DigitsForSymbol(symbol)) + "\n"
+      + "Break/trigger level: " + DoubleToString(levels.triggerLevel, digits) + "\n"
+      + "Current market price: " + DoubleToString(levels.marketPrice, digits) + "\n"
+      + "Suggested entry price: " + DoubleToString(levels.entry, digits) + "\n"
+      + "Suggested stop loss: " + DoubleToString(levels.stopLoss, digits) + "\n"
+      + "Suggested take profit: " + DoubleToString(levels.takeProfit, digits) + "\n"
       + "Risk-to-reward: 1:" + DoubleToString(levels.rewardRisk, 2) + "\n"
-      + "Time: " + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
+      + "Server time: " + TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS) + "\n"
+      + "SAST-adjusted time: " + TimeToString(sastTime, TIME_DATE | TIME_SECONDS);
 
    Print(message);
 
@@ -690,6 +761,7 @@ void DrawSetupObjects(string symbol, int timeframe, string direction, datetime c
    string prefix = "stayTRU_TCF_" + symbol + "_" + TimeframeToString(timeframe) + "_" + direction + "_" + IntegerToString((int)candleTime);
    color signalColor = direction == "BUY" ? clrLime : clrRed;
    int arrowCode = direction == "BUY" ? 233 : 234;
+   DeleteObjectsByPrefix(prefix);
 
    string arrowName = prefix + "_Arrow";
    double arrowPrice = direction == "BUY" ? levels.entry - (10 * Point) : levels.entry + (10 * Point);
@@ -698,7 +770,8 @@ void DrawSetupObjects(string symbol, int timeframe, string direction, datetime c
    ObjectSetInteger(0, arrowName, OBJPROP_COLOR, signalColor);
    ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 2);
 
-   DrawHorizontalLine(prefix + "_Entry", levels.entry, clrDodgerBlue, STYLE_SOLID);
+   DrawHorizontalLine(prefix + "_Trigger", levels.triggerLevel, clrDodgerBlue, STYLE_SOLID);
+   DrawHorizontalLine(prefix + "_Entry", levels.entry, clrDeepSkyBlue, STYLE_DOT);
    DrawHorizontalLine(prefix + "_StopLoss", levels.stopLoss, clrTomato, STYLE_DASH);
    DrawHorizontalLine(prefix + "_TakeProfit", levels.takeProfit, clrLimeGreen, STYLE_DASH);
 
@@ -706,7 +779,8 @@ void DrawSetupObjects(string symbol, int timeframe, string direction, datetime c
    ObjectCreate(0, labelName, OBJ_TEXT, 0, candleTime, levels.entry);
    ObjectSetText(labelName,
       direction + " | " + TimeframeToString(timeframe)
-      + " | Entry " + DoubleToString(levels.entry, digits)
+      + " | Trigger " + DoubleToString(levels.triggerLevel, digits)
+      + " | Market " + DoubleToString(levels.marketPrice, digits)
       + " | SL " + DoubleToString(levels.stopLoss, digits)
       + " | TP " + DoubleToString(levels.takeProfit, digits)
       + " | RR 1:" + DoubleToString(levels.rewardRisk, 2),
@@ -721,6 +795,18 @@ void DrawHorizontalLine(string name, double price, color lineColor, int style)
    ObjectSetInteger(0, name, OBJPROP_STYLE, style);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
    ObjectSetDouble(0, name, OBJPROP_PRICE1, price);
+}
+
+// Removes existing objects for the same symbol, timeframe, direction, and candle.
+void DeleteObjectsByPrefix(string prefix)
+{
+   int total = ObjectsTotal(0, -1, -1);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, prefix, 0) == 0)
+         ObjectDelete(0, name);
+   }
 }
 
 // Prints structured scanner status.
@@ -742,6 +828,39 @@ int GetSymbolIndex(string symbol)
       return(0);
 
    return(-1);
+}
+
+// Resolves configured base symbols such as EURUSD to broker symbols such as EURUSDm.
+string ResolveBrokerSymbol(string requestedSymbol)
+{
+   string requested = TrimString(requestedSymbol);
+   if(requested == "")
+      return(requested);
+
+   if(SymbolSelect(requested, true))
+      return(requested);
+
+   string requestedBase = StripSymbolSuffix(requested);
+   int selectedTotal = SymbolsTotal(true);
+   for(int i = 0; i < selectedTotal; i++)
+   {
+      string selectedSymbol = SymbolName(i, true);
+      if(StripSymbolSuffix(selectedSymbol) == requestedBase)
+         return(selectedSymbol);
+   }
+
+   int allTotal = SymbolsTotal(false);
+   for(int j = 0; j < allTotal; j++)
+   {
+      string availableSymbol = SymbolName(j, false);
+      if(StripSymbolSuffix(availableSymbol) == requestedBase)
+      {
+         SymbolSelect(availableSymbol, true);
+         return(availableSymbol);
+      }
+   }
+
+   return(requested);
 }
 
 // Converts broker precision into a pip size.
