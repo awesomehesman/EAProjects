@@ -24,6 +24,7 @@ input bool   EnableEmailAlert           = false;
 input bool   EnableSoundAlert           = true;
 input string SoundFile                  = "alert.wav";
 input bool   ScanOnlyCurrentChartSymbol = true;
+input bool   TesterScanOnlyCurrentSymbol = true;
 input string SymbolsToScan              = "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,XAUUSD";
 input bool   ApplyCleanChartTheme       = true;
 input color  BullishCandleColor         = clrLime;
@@ -115,7 +116,7 @@ void OnTick()
    if(UseSessionFilter && !IsWithinTradingSession())
       return;
 
-   if(ScanOnlyCurrentChartSymbol)
+   if(ShouldScanOnlyCurrentSymbol())
       ScanSymbol(Symbol());
    else
    {
@@ -127,7 +128,7 @@ void OnTick()
 // Loads and normalizes symbols from inputs.
 void LoadSymbolsToScan()
 {
-   if(ScanOnlyCurrentChartSymbol)
+   if(ShouldScanOnlyCurrentSymbol())
    {
       ArrayResize(g_symbols, 1);
       g_symbols[0] = Symbol();
@@ -171,8 +172,13 @@ void ScanSymbol(string symbol)
 
    if(!SymbolSelect(symbol, true))
    {
-      LogSetupStatus(symbol, "INIT", "REJECTED", "Symbol could not be selected in Market Watch.");
-      return;
+      string resolvedSymbol = ResolveBrokerSymbol(symbol);
+      if(resolvedSymbol == "" || !SymbolSelect(resolvedSymbol, true))
+      {
+         LogSetupStatus(symbol, "INIT", "REJECTED", "Symbol could not be selected in Market Watch.");
+         return;
+      }
+      symbol = resolvedSymbol;
    }
 
    int entryTf = GetEntryTimeframe(symbol);
@@ -842,6 +848,14 @@ void LogSetupStatus(string symbol, string stage, string status, string detail)
    Print(EA_NAME, " | Symbol scanned: ", symbol, " | Stage: ", stage, " | Status: ", status, " | ", detail);
 }
 
+// In Strategy Tester, MT4 normally exposes only the tested chart symbol.
+bool ShouldScanOnlyCurrentSymbol()
+{
+   if(IsTesting() && TesterScanOnlyCurrentSymbol)
+      return(true);
+   return(ScanOnlyCurrentChartSymbol);
+}
+
 // Returns the configured symbol index, adding chart symbol when needed.
 int GetSymbolIndex(string symbol)
 {
@@ -864,10 +878,14 @@ string ResolveBrokerSymbol(string requestedSymbol)
    if(requested == "")
       return(requested);
 
+   string requestedBase = StripSymbolSuffix(requested);
+   string currentSymbol = Symbol();
+   if(StripSymbolSuffix(currentSymbol) == requestedBase)
+      return(currentSymbol);
+
    if(SymbolSelect(requested, true))
       return(requested);
 
-   string requestedBase = StripSymbolSuffix(requested);
    int selectedTotal = SymbolsTotal(true);
    for(int i = 0; i < selectedTotal; i++)
    {
