@@ -5,12 +5,14 @@
 #property description "stayTRU Trend Continuation Framework - Version 1.1 Alert Only"
 
 input bool   UseSessionFilter           = true;
+input bool   TesterIgnoreSessionFilter  = true;
 input int    StartHour                  = 9;
 input int    EndHour                    = 18;
 input int    ServerToSASTOffsetHours    = 0;
 input int    SwingLookback              = 3;
 input int    TrendSwingCount            = 3;
-input bool   H4RequireConfirmedPullbackSwing = true;
+input bool   H4RequireConfirmedPullbackSwing = false;
+input bool   TesterRelaxH4PullbackConfirmation = true;
 input double H4MinPullbackPips          = 10.0;
 input double H4MinPullbackPipsGold      = 100.0;
 input double MaxSpreadPips              = 3.0;
@@ -80,6 +82,8 @@ int OnInit()
    LoadSymbolsToScan();
    ApplyChartTheme();
    Print(EA_NAME, " v1.1 initialized. ALERT-ONLY mode. Symbols loaded: ", ArraySize(g_symbols));
+   if(IsTesting() && UseSessionFilter && TesterIgnoreSessionFilter)
+      Print(EA_NAME, " | Strategy Tester mode: session filter bypassed because TesterIgnoreSessionFilter=true.");
    return(INIT_SUCCEEDED);
 }
 
@@ -113,7 +117,7 @@ void ApplyChartTheme()
 // Scans the active chart symbol or configured symbol list on each tick.
 void OnTick()
 {
-   if(UseSessionFilter && !IsWithinTradingSession())
+   if(ShouldUseSessionFilter() && !IsWithinTradingSession())
       return;
 
    if(ShouldScanOnlyCurrentSymbol())
@@ -123,6 +127,24 @@ void OnTick()
       for(int i = 0; i < ArraySize(g_symbols); i++)
          ScanSymbol(g_symbols[i]);
    }
+}
+
+// Keeps the live session filter intact while allowing easier Strategy Tester diagnostics.
+bool ShouldUseSessionFilter()
+{
+   if(!UseSessionFilter)
+      return(false);
+   if(IsTesting() && TesterIgnoreSessionFilter)
+      return(false);
+   return(true);
+}
+
+// Lets Strategy Tester evaluate active pullbacks instead of requiring delayed H4 swing confirmation.
+bool ShouldRequireH4ConfirmedPullbackSwing()
+{
+   if(IsTesting() && TesterRelaxH4PullbackConfirmation)
+      return(false);
+   return(H4RequireConfirmedPullbackSwing);
 }
 
 // Loads and normalizes symbols from inputs.
@@ -170,10 +192,10 @@ void ScanSymbol(string symbol)
    if(symbol == "")
       return;
 
-   if(!SymbolSelect(symbol, true))
+   if(!CanUseSymbol(symbol))
    {
       string resolvedSymbol = ResolveBrokerSymbol(symbol);
-      if(resolvedSymbol == "" || !SymbolSelect(resolvedSymbol, true))
+      if(resolvedSymbol == "" || !CanUseSymbol(resolvedSymbol))
       {
          LogSetupStatus(symbol, "INIT", "REJECTED", "Symbol could not be selected in Market Watch.");
          return;
@@ -505,7 +527,7 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
       double priorH4SwingLow = (lowCount >= 2) ? lows[1] : lows[0];
       pullback.protectedLevel = MathMax(trend.latestLow, priorH4SwingLow);
       bool bullishRetracedFromHigh = (closeNow < highs[0]);
-      bool bullishConfirmedSwing = (!H4RequireConfirmedPullbackSwing || lowShifts[0] < highShifts[0]);
+      bool bullishConfirmedSwing = (!ShouldRequireH4ConfirmedPullbackSwing() || lowShifts[0] < highShifts[0]);
       double bullishPullbackPips = (highs[0] - lows[0]) / PipSize(symbol);
       double minPullbackPips = IsGoldSymbol(symbol) ? H4MinPullbackPipsGold : H4MinPullbackPips;
       bool bullishBrokeStructure = (lowNow <= pullback.protectedLevel || iClose(symbol, PERIOD_H4, 1) <= pullback.protectedLevel);
@@ -517,7 +539,7 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
       }
       if(!bullishConfirmedSwing)
       {
-         pullback.reason = "Bullish trend, but no confirmed H4 pullback swing low after the swing high.";
+         pullback.reason = "Bullish trend, but strict H4 confirmation requires a confirmed pullback swing low after the swing high.";
          return;
       }
       if(bullishPullbackPips < minPullbackPips)
@@ -541,7 +563,7 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
       double priorH4SwingHigh = (highCount >= 2) ? highs[1] : highs[0];
       pullback.protectedLevel = MathMin(trend.latestHigh, priorH4SwingHigh);
       bool bearishRetracedFromLow = (closeNow > lows[0]);
-      bool bearishConfirmedSwing = (!H4RequireConfirmedPullbackSwing || highShifts[0] < lowShifts[0]);
+      bool bearishConfirmedSwing = (!ShouldRequireH4ConfirmedPullbackSwing() || highShifts[0] < lowShifts[0]);
       double bearishPullbackPips = (highs[0] - lows[0]) / PipSize(symbol);
       double minBearishPullbackPips = IsGoldSymbol(symbol) ? H4MinPullbackPipsGold : H4MinPullbackPips;
       bool bearishBrokeStructure = (highNow >= pullback.protectedLevel || iClose(symbol, PERIOD_H4, 1) >= pullback.protectedLevel);
@@ -553,7 +575,7 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
       }
       if(!bearishConfirmedSwing)
       {
-         pullback.reason = "Bearish trend, but no confirmed H4 pullback swing high after the swing low.";
+         pullback.reason = "Bearish trend, but strict H4 confirmation requires a confirmed pullback swing high after the swing low.";
          return;
       }
       if(bearishPullbackPips < minBearishPullbackPips)
@@ -735,6 +757,12 @@ bool ShouldScanNewCandle(string symbol, datetime candleTime)
    if(index < 0)
       return(false);
 
+   if(g_lastScannedCandleTimes[index] == 0)
+   {
+      g_lastScannedCandleTimes[index] = candleTime;
+      return(true);
+   }
+
    if(g_lastScannedCandleTimes[index] == candleTime)
       return(false);
 
@@ -854,6 +882,18 @@ bool ShouldScanOnlyCurrentSymbol()
    if(IsTesting() && TesterScanOnlyCurrentSymbol)
       return(true);
    return(ScanOnlyCurrentChartSymbol);
+}
+
+// Accepts the active Strategy Tester symbol even when SymbolSelect is unavailable there.
+bool CanUseSymbol(string symbol)
+{
+   if(symbol == "")
+      return(false);
+
+   if(IsTesting() && symbol == Symbol())
+      return(true);
+
+   return(SymbolSelect(symbol, true));
 }
 
 // Returns the configured symbol index, adding chart symbol when needed.
