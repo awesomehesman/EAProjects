@@ -1,8 +1,8 @@
 #property strict
 #property copyright "stayTRU"
 #property link      ""
-#property version   "1.10"
-#property description "stayTRU Trend Continuation Framework - Version 1.1 Alert Only"
+#property version   "1.25"
+#property description "stayTRU Trend Continuation Framework - Version 1.25 Scanner and Tester Execution"
 
 input bool   UseSessionFilter           = true;
 input bool   TesterIgnoreSessionFilter  = true;
@@ -11,15 +11,50 @@ input int    EndHour                    = 18;
 input int    ServerToSASTOffsetHours    = 0;
 input int    SwingLookback              = 3;
 input int    TrendSwingCount            = 3;
+input bool   UseStrictDailyTrendSequence = false;
 input bool   H4RequireConfirmedPullbackSwing = false;
 input bool   TesterRelaxH4PullbackConfirmation = true;
+input bool   H4RequireTrendRejectionCandle = true;
+input bool   H4RejectionMustBreakPreviousCandle = false;
+input double H4RejectionBreakBufferPips = 1.0;
+input double H4RejectionBreakBufferPipsGold = 10.0;
 input double H4MinPullbackPips          = 10.0;
 input double H4MinPullbackPipsGold      = 100.0;
+input bool   UseH1StructureFilterForFastSymbols = false;
+input int    EntryMaxBarsAfterPullbackSwing = 12;
+input double EntryMinSwingImprovementPips = 3.0;
+input double EntryMinSwingImprovementPipsGold = 30.0;
+input double EntryBreakBufferPips       = 0.5;
+input double EntryBreakBufferPipsGold   = 5.0;
+input double EntryMaxCloseBeyondTriggerPips = 4.0;
+input double EntryMaxCloseBeyondTriggerPipsGold = 40.0;
+input bool   EntryRequireBreakCandleDirection = true;
+input bool   EntryRequireRetestAfterBreak = true;
+input int    EntryRetestExpiryBars      = 8;
+input double EntryRetestTolerancePips   = 1.5;
+input double EntryRetestTolerancePipsGold = 15.0;
 input double MaxSpreadPips              = 3.0;
 input double MaxSpreadPipsGold          = 50.0;
+input bool   TesterUseSpreadOverride    = true;
+input double TesterMaxSpreadPips        = 5.0;
+input double TesterMaxSpreadPipsGold    = 80.0;
 input double StopBufferPips             = 5.0;
 input double StopBufferPipsGold         = 50.0;
+input bool   UseH4PullbackStopReference = true;
 input double MinRewardRisk              = 2.5;
+input bool   UseStructuralTakeProfit    = true;
+input double StructuralTargetBufferPips = 2.0;
+input double StructuralTargetBufferPipsGold = 20.0;
+input bool   RequireH4PremiumDiscountEntry = true;
+input double BuyMaxH4RangePosition      = 0.45;
+input double SellMinH4RangePosition     = 0.55;
+input bool   EnableTradeExecution       = false;
+input bool   TesterEnableTradeExecution = true;
+input double FixedLotSize               = 0.10;
+input double SlippagePips               = 2.0;
+input int    MagicNumber                = 27052026;
+input bool   AllowOnlyOneOpenTradePerSymbol = true;
+input string TradeComment               = "stayTRU TCF";
 input bool   EnablePopupAlert           = true;
 input bool   EnablePushNotification     = true;
 input bool   EnableEmailAlert           = false;
@@ -75,13 +110,21 @@ string   g_symbols[];
 datetime g_lastBuyAlertTimes[];
 datetime g_lastSellAlertTimes[];
 datetime g_lastScannedCandleTimes[];
+bool     g_pendingBuyRetest[];
+bool     g_pendingSellRetest[];
+double   g_pendingBuyTriggerLevels[];
+double   g_pendingSellTriggerLevels[];
+double   g_pendingBuyStopReferences[];
+double   g_pendingSellStopReferences[];
+datetime g_pendingBuyBreakTimes[];
+datetime g_pendingSellBreakTimes[];
 
 // Initializes the symbol list and alert state.
 int OnInit()
 {
    LoadSymbolsToScan();
    ApplyChartTheme();
-   Print(EA_NAME, " v1.1 initialized. ALERT-ONLY mode. Symbols loaded: ", ArraySize(g_symbols));
+   Print(EA_NAME, " v1.25 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
    if(IsTesting() && UseSessionFilter && TesterIgnoreSessionFilter)
       Print(EA_NAME, " | Strategy Tester mode: session filter bypassed because TesterIgnoreSessionFilter=true.");
    return(INIT_SUCCEEDED);
@@ -177,11 +220,27 @@ void LoadSymbolsToScan()
    ArrayResize(g_lastBuyAlertTimes, ArraySize(g_symbols));
    ArrayResize(g_lastSellAlertTimes, ArraySize(g_symbols));
    ArrayResize(g_lastScannedCandleTimes, ArraySize(g_symbols));
+   ArrayResize(g_pendingBuyRetest, ArraySize(g_symbols));
+   ArrayResize(g_pendingSellRetest, ArraySize(g_symbols));
+   ArrayResize(g_pendingBuyTriggerLevels, ArraySize(g_symbols));
+   ArrayResize(g_pendingSellTriggerLevels, ArraySize(g_symbols));
+   ArrayResize(g_pendingBuyStopReferences, ArraySize(g_symbols));
+   ArrayResize(g_pendingSellStopReferences, ArraySize(g_symbols));
+   ArrayResize(g_pendingBuyBreakTimes, ArraySize(g_symbols));
+   ArrayResize(g_pendingSellBreakTimes, ArraySize(g_symbols));
    for(int j = 0; j < ArraySize(g_symbols); j++)
    {
       g_lastBuyAlertTimes[j] = 0;
       g_lastSellAlertTimes[j] = 0;
       g_lastScannedCandleTimes[j] = 0;
+      g_pendingBuyRetest[j] = false;
+      g_pendingSellRetest[j] = false;
+      g_pendingBuyTriggerLevels[j] = 0.0;
+      g_pendingSellTriggerLevels[j] = 0.0;
+      g_pendingBuyStopReferences[j] = 0.0;
+      g_pendingSellStopReferences[j] = 0.0;
+      g_pendingBuyBreakTimes[j] = 0;
+      g_pendingSellBreakTimes[j] = 0;
    }
 }
 
@@ -215,7 +274,7 @@ void ScanSymbol(string symbol)
       return;
 
    double spread = GetSpreadPips(symbol);
-   double allowedSpread = IsGoldSymbol(symbol) ? MaxSpreadPipsGold : MaxSpreadPips;
+   double allowedSpread = GetAllowedSpreadPips(symbol);
    if(spread > allowedSpread)
    {
       LogSetupStatus(symbol, "SPREAD", "REJECTED", "Spread " + DoubleToString(spread, 1) + " pips exceeds allowed " + DoubleToString(allowedSpread, 1));
@@ -231,6 +290,9 @@ void ScanSymbol(string symbol)
       LogSetupStatus(symbol, "TREND", "REJECTED", "Daily structure is unclear.");
       return;
    }
+
+   if(!ValidateIntermediateStructure(symbol, trend.direction))
+      return;
 
    PullbackInfo pullback;
    ValidateH4Pullback(symbol, trend, pullback);
@@ -249,9 +311,10 @@ void ScanSymbol(string symbol)
 void ProcessBuySetup(string symbol, int entryTf, datetime candleTime, TrendInfo &trend, PullbackInfo &pullback)
 {
    double breakLevel = 0.0;
+   double entryStopReference = 0.0;
    string reason = "";
 
-   if(!DetectBullishStructureBreak(symbol, entryTf, breakLevel, reason))
+   if(!DetectBullishStructureBreak(symbol, entryTf, breakLevel, entryStopReference, reason))
    {
       LogSetupStatus(symbol, "ENTRY BUY", "REJECTED", reason);
       return;
@@ -259,7 +322,17 @@ void ProcessBuySetup(string symbol, int entryTf, datetime candleTime, TrendInfo 
 
    LevelInfo levels;
    double marketPrice = GetAlertMarketPrice(symbol, OP_BUY);
-   CalculateSuggestedLevels(symbol, OP_BUY, breakLevel, marketPrice, pullback.swingLow, levels);
+   if(!ValidateH4EntryLocation(symbol, OP_BUY, entryStopReference, pullback, reason))
+   {
+      LogSetupStatus(symbol, "LOCATION BUY", "REJECTED", reason);
+      return;
+   }
+   LogSetupStatus(symbol, "LOCATION BUY", "VALID", reason);
+
+   double stopReference = GetSetupStopReference(OP_BUY, entryStopReference, pullback);
+   LogSetupStatus(symbol, "STOP BUY", "INFO", "Entry swing stop ref: " + DoubleToString(entryStopReference, DigitsForSymbol(symbol)) + " | Final stop ref: " + DoubleToString(stopReference, DigitsForSymbol(symbol)));
+
+   CalculateSuggestedLevels(symbol, OP_BUY, breakLevel, marketPrice, stopReference, pullback.swingHigh, levels);
    if(!levels.valid)
    {
       LogSetupStatus(symbol, "LEVELS BUY", "REJECTED", levels.reason);
@@ -274,6 +347,7 @@ void ProcessBuySetup(string symbol, int entryTf, datetime candleTime, TrendInfo 
 
    SendSetupAlert(symbol, "BUY", "Bullish", TimeframeToString(entryTf), levels);
    DrawSetupObjects(symbol, entryTf, "BUY", candleTime, levels);
+   ExecuteSetupTrade(symbol, OP_BUY, levels);
    SetLastAlertTime(symbol, OP_BUY, candleTime);
    LogSetupStatus(symbol, "ALERT BUY", "SENT", "Structure break above " + DoubleToString(breakLevel, DigitsForSymbol(symbol)));
 }
@@ -282,9 +356,10 @@ void ProcessBuySetup(string symbol, int entryTf, datetime candleTime, TrendInfo 
 void ProcessSellSetup(string symbol, int entryTf, datetime candleTime, TrendInfo &trend, PullbackInfo &pullback)
 {
    double breakLevel = 0.0;
+   double entryStopReference = 0.0;
    string reason = "";
 
-   if(!DetectBearishStructureBreak(symbol, entryTf, breakLevel, reason))
+   if(!DetectBearishStructureBreak(symbol, entryTf, breakLevel, entryStopReference, reason))
    {
       LogSetupStatus(symbol, "ENTRY SELL", "REJECTED", reason);
       return;
@@ -292,7 +367,17 @@ void ProcessSellSetup(string symbol, int entryTf, datetime candleTime, TrendInfo
 
    LevelInfo levels;
    double marketPrice = GetAlertMarketPrice(symbol, OP_SELL);
-   CalculateSuggestedLevels(symbol, OP_SELL, breakLevel, marketPrice, pullback.swingHigh, levels);
+   if(!ValidateH4EntryLocation(symbol, OP_SELL, entryStopReference, pullback, reason))
+   {
+      LogSetupStatus(symbol, "LOCATION SELL", "REJECTED", reason);
+      return;
+   }
+   LogSetupStatus(symbol, "LOCATION SELL", "VALID", reason);
+
+   double stopReference = GetSetupStopReference(OP_SELL, entryStopReference, pullback);
+   LogSetupStatus(symbol, "STOP SELL", "INFO", "Entry swing stop ref: " + DoubleToString(entryStopReference, DigitsForSymbol(symbol)) + " | Final stop ref: " + DoubleToString(stopReference, DigitsForSymbol(symbol)));
+
+   CalculateSuggestedLevels(symbol, OP_SELL, breakLevel, marketPrice, stopReference, pullback.swingLow, levels);
    if(!levels.valid)
    {
       LogSetupStatus(symbol, "LEVELS SELL", "REJECTED", levels.reason);
@@ -307,6 +392,7 @@ void ProcessSellSetup(string symbol, int entryTf, datetime candleTime, TrendInfo
 
    SendSetupAlert(symbol, "SELL", "Bearish", TimeframeToString(entryTf), levels);
    DrawSetupObjects(symbol, entryTf, "SELL", candleTime, levels);
+   ExecuteSetupTrade(symbol, OP_SELL, levels);
    SetLastAlertTime(symbol, OP_SELL, candleTime);
    LogSetupStatus(symbol, "ALERT SELL", "SENT", "Structure break below " + DoubleToString(breakLevel, DigitsForSymbol(symbol)));
 }
@@ -348,6 +434,21 @@ double GetSpreadPips(string symbol)
    double pip = PipSize(symbol);
    double spreadPoints = MarketInfo(symbol, MODE_SPREAD);
    return((spreadPoints * point) / pip);
+}
+
+// Uses wider tester spread limits without weakening live/demo chart spread limits.
+double GetAllowedSpreadPips(string symbol)
+{
+   if(IsTesting() && TesterUseSpreadOverride)
+   {
+      if(IsGoldSymbol(symbol))
+         return(TesterMaxSpreadPipsGold);
+      return(TesterMaxSpreadPips);
+   }
+
+   if(IsGoldSymbol(symbol))
+      return(MaxSpreadPipsGold);
+   return(MaxSpreadPips);
 }
 
 // Detects confirmed swing highs.
@@ -434,6 +535,42 @@ int GetRecentSwingLows(string symbol, int timeframe, int needed, double &values[
    return(found);
 }
 
+// Gets the highest high between two completed-bar shift indexes.
+double GetHighestHighInShiftRange(string symbol, int timeframe, int startShift, int endShift)
+{
+   if(endShift < startShift)
+      return(0.0);
+
+   double highest = 0.0;
+   for(int shift = startShift; shift <= endShift; shift++)
+   {
+      double value = iHigh(symbol, timeframe, shift);
+      if(value <= 0.0)
+         continue;
+      if(highest == 0.0 || value > highest)
+         highest = value;
+   }
+   return(highest);
+}
+
+// Gets the lowest low between two completed-bar shift indexes.
+double GetLowestLowInShiftRange(string symbol, int timeframe, int startShift, int endShift)
+{
+   if(endShift < startShift)
+      return(0.0);
+
+   double lowest = 0.0;
+   for(int shift = startShift; shift <= endShift; shift++)
+   {
+      double value = iLow(symbol, timeframe, shift);
+      if(value <= 0.0)
+         continue;
+      if(lowest == 0.0 || value < lowest)
+         lowest = value;
+   }
+   return(lowest);
+}
+
 // Determines Daily market-structure trend.
 void GetDailyTrend(string symbol, TrendInfo &trend)
 {
@@ -478,18 +615,131 @@ void GetDailyTrend(string symbol, TrendInfo &trend)
    trend.latestHighShift = highShifts[0];
    trend.latestLowShift = lowShifts[0];
 
-   if(bullish)
+   if(UseStrictDailyTrendSequence)
+   {
+      if(bullish)
+      {
+         trend.direction = 1;
+         trend.description = "Bullish - Daily higher highs and higher lows.";
+      }
+      else if(bearish)
+      {
+         trend.direction = -1;
+         trend.description = "Bearish - Daily lower lows and lower highs.";
+      }
+      else
+         trend.description = "Unclear - Daily swing sequence is mixed.";
+      return;
+   }
+
+   double dailyClose = iClose(symbol, PERIOD_D1, 1);
+   bool latestBullishBreak = (highs[0] > highs[1]);
+   bool latestBearishBreak = (lows[0] < lows[1]);
+
+   if(bullish || (latestBullishBreak && !latestBearishBreak && dailyClose > lows[0]))
    {
       trend.direction = 1;
-      trend.description = "Bullish - Daily higher highs and higher lows.";
+      if(bullish)
+         trend.description = "Bullish - Daily higher highs and higher lows.";
+      else
+         trend.description = "Bullish bias - latest Daily swing high broke upward; protected Daily low intact.";
+      return;
    }
-   else if(bearish)
+
+   if(bearish || (latestBearishBreak && !latestBullishBreak && dailyClose < highs[0]))
    {
       trend.direction = -1;
-      trend.description = "Bearish - Daily lower lows and lower highs.";
+      if(bearish)
+         trend.description = "Bearish - Daily lower lows and lower highs.";
+      else
+         trend.description = "Bearish bias - latest Daily swing low broke downward; protected Daily high intact.";
+      return;
    }
-   else
-      trend.description = "Unclear - Daily swing sequence is mixed.";
+
+   if(latestBullishBreak && latestBearishBreak)
+   {
+      if(highShifts[0] < lowShifts[0] && dailyClose > lows[0])
+      {
+         trend.direction = 1;
+         trend.description = "Bullish bias - mixed Daily swings, but latest confirmed break is upward and protected low is intact.";
+         return;
+      }
+
+      if(lowShifts[0] < highShifts[0] && dailyClose < highs[0])
+      {
+         trend.direction = -1;
+         trend.description = "Bearish bias - mixed Daily swings, but latest confirmed break is downward and protected high is intact.";
+         return;
+      }
+   }
+
+   trend.description = "Unclear - Daily swing sequence is mixed and no dominant latest break is confirmed.";
+}
+
+// Requires H1 structure agreement for fast-symbol M15 entries.
+bool ValidateIntermediateStructure(string symbol, int trendDirection)
+{
+   if(!UseH1StructureFilterForFastSymbols)
+   {
+      LogSetupStatus(symbol, "H1 FILTER", "SKIPPED", "H1 agreement filter disabled; H4 pullback and entry timeframe will confirm continuation.");
+      return(true);
+   }
+
+   if(!IsFastSymbol(symbol))
+      return(true);
+
+   string reason = "";
+   int h1Trend = GetStructureTrend(symbol, PERIOD_H1, 2, reason);
+   if(h1Trend == trendDirection)
+   {
+      LogSetupStatus(symbol, "H1 FILTER", "VALID", reason);
+      return(true);
+   }
+
+   LogSetupStatus(symbol, "H1 FILTER", "REJECTED", "H1 structure does not agree with Daily trend. " + reason);
+   return(false);
+}
+
+// Returns basic swing-structure direction for any timeframe.
+int GetStructureTrend(string symbol, int timeframe, int swingCount, string &reason)
+{
+   int needed = MathMax(swingCount, 2);
+   double highs[];
+   double lows[];
+   int highShifts[];
+   int lowShifts[];
+
+   int highCount = GetRecentSwingHighs(symbol, timeframe, needed, highs, highShifts);
+   int lowCount = GetRecentSwingLows(symbol, timeframe, needed, lows, lowShifts);
+   if(highCount < needed || lowCount < needed)
+   {
+      reason = TimeframeToString(timeframe) + " has insufficient confirmed swings.";
+      return(0);
+   }
+
+   bool bullish = true;
+   bool bearish = true;
+   for(int i = 0; i < needed - 1; i++)
+   {
+      if(!(highs[i] > highs[i + 1] && lows[i] > lows[i + 1]))
+         bullish = false;
+      if(!(highs[i] < highs[i + 1] && lows[i] < lows[i + 1]))
+         bearish = false;
+   }
+
+   if(bullish)
+   {
+      reason = TimeframeToString(timeframe) + " higher highs and higher lows.";
+      return(1);
+   }
+   if(bearish)
+   {
+      reason = TimeframeToString(timeframe) + " lower highs and lower lows.";
+      return(-1);
+   }
+
+   reason = TimeframeToString(timeframe) + " structure is mixed.";
+   return(0);
 }
 
 // Validates H4 pullback without allowing major structure break.
@@ -547,6 +797,8 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
          pullback.reason = "Bullish H4 pullback is too shallow: " + DoubleToString(bullishPullbackPips, 1) + " pips.";
          return;
       }
+      if(!ValidateH4TrendRejection(symbol, OP_BUY, pullback.reason))
+         return;
       if(bullishBrokeStructure)
       {
          pullback.reason = "Bullish setup invalidated - latest major Daily/H4 swing low broken.";
@@ -583,6 +835,8 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
          pullback.reason = "Bearish H4 pullback is too shallow: " + DoubleToString(bearishPullbackPips, 1) + " pips.";
          return;
       }
+      if(!ValidateH4TrendRejection(symbol, OP_SELL, pullback.reason))
+         return;
       if(bearishBrokeStructure)
       {
          pullback.reason = "Bearish setup invalidated - latest major Daily/H4 swing high broken.";
@@ -594,44 +848,80 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
    }
 }
 
-// Finds entry-timeframe lower highs and a break above the most recent one.
-bool DetectBullishStructureBreak(string symbol, int timeframe, double &breakLevel, string &reason)
+// Requires the last closed H4 candle to reject the pullback back in trend direction.
+bool ValidateH4TrendRejection(string symbol, int orderType, string &reason)
 {
-   double highs[];
-   int shifts[];
-   int found = GetRecentSwingHighs(symbol, timeframe, 2, highs, shifts);
-   if(found < 2)
-   {
-      reason = "Not enough entry timeframe swing highs for lower-high pullback structure.";
-      return(false);
-   }
-
-   if(!(highs[0] < highs[1]))
-   {
-      reason = "Entry pullback has not formed lower highs.";
-      return(false);
-   }
-
-   breakLevel = highs[0];
-   double closeLast = iClose(symbol, timeframe, 1);
-   double closePrev = iClose(symbol, timeframe, 2);
-
-   if(closeLast > breakLevel && closePrev <= breakLevel)
-   {
-      reason = "Break above most recent lower high confirmed.";
+   if(!H4RequireTrendRejectionCandle)
       return(true);
+
+   double closeLast = iClose(symbol, PERIOD_H4, 1);
+   double openLast = iOpen(symbol, PERIOD_H4, 1);
+   double highLast = iHigh(symbol, PERIOD_H4, 1);
+   double lowLast = iLow(symbol, PERIOD_H4, 1);
+   double prevHigh = iHigh(symbol, PERIOD_H4, 2);
+   double prevLow = iLow(symbol, PERIOD_H4, 2);
+   double buffer = (IsGoldSymbol(symbol) ? H4RejectionBreakBufferPipsGold : H4RejectionBreakBufferPips) * PipSize(symbol);
+   double candleRange = highLast - lowLast;
+
+   if(candleRange <= 0.0)
+   {
+      reason = "H4 rejection candle has invalid range.";
+      return(false);
    }
 
-   reason = "No fresh break above most recent lower high.";
+   if(orderType == OP_BUY)
+   {
+      bool bullishCandle = (closeLast > openLast);
+      bool closesStrong = (closeLast >= lowLast + (candleRange * 0.60));
+      bool breaksPrevious = (closeLast > prevHigh + buffer);
+
+      if(bullishCandle && (closesStrong || breaksPrevious))
+      {
+         if(H4RejectionMustBreakPreviousCandle && !breaksPrevious)
+         {
+            reason = "H4 bullish rejection found, but it did not break previous H4 high.";
+            return(false);
+         }
+         return(true);
+      }
+
+      reason = "H4 pullback valid, but last H4 candle did not reject bullishly from the pullback.";
+      return(false);
+   }
+
+   if(orderType == OP_SELL)
+   {
+      bool bearishCandle = (closeLast < openLast);
+      bool closesStrong = (closeLast <= highLast - (candleRange * 0.60));
+      bool breaksPrevious = (closeLast < prevLow - buffer);
+
+      if(bearishCandle && (closesStrong || breaksPrevious))
+      {
+         if(H4RejectionMustBreakPreviousCandle && !breaksPrevious)
+         {
+            reason = "H4 bearish rejection found, but it did not break previous H4 low.";
+            return(false);
+         }
+         return(true);
+      }
+
+      reason = "H4 pullback valid, but last H4 candle did not reject bearishly from the pullback.";
+      return(false);
+   }
+
+   reason = "Unsupported H4 rejection direction.";
    return(false);
 }
 
-// Finds entry-timeframe higher lows and a break below the most recent one.
-bool DetectBearishStructureBreak(string symbol, int timeframe, double &breakLevel, string &reason)
+// Finds an entry-timeframe higher low and a break above the post-pullback high.
+bool DetectBullishStructureBreak(string symbol, int timeframe, double &breakLevel, double &stopReference, string &reason)
 {
+   if(CheckPendingRetestEntry(symbol, timeframe, OP_BUY, breakLevel, stopReference, reason))
+      return(true);
+
    double lows[];
-   int shifts[];
-   int found = GetRecentSwingLows(symbol, timeframe, 2, lows, shifts);
+   int lowShifts[];
+   int found = GetRecentSwingLows(symbol, timeframe, 2, lows, lowShifts);
    if(found < 2)
    {
       reason = "Not enough entry timeframe swing lows for higher-low pullback structure.";
@@ -640,29 +930,373 @@ bool DetectBearishStructureBreak(string symbol, int timeframe, double &breakLeve
 
    if(!(lows[0] > lows[1]))
    {
-      reason = "Entry pullback has not formed higher lows.";
+      reason = "Entry pullback has not formed a higher low.";
       return(false);
    }
 
-   breakLevel = lows[0];
+   int barsAfterHigherLow = lowShifts[0] - 1;
+   if(barsAfterHigherLow > EntryMaxBarsAfterPullbackSwing)
+   {
+      reason = "Higher-low trigger is stale; too many bars after pullback swing.";
+      return(false);
+   }
+
+   double minSwingImprovement = GetEntryMinSwingImprovementPips(symbol) * PipSize(symbol);
+   if((lows[0] - lows[1]) < minSwingImprovement)
+   {
+      reason = "Higher low is too marginal versus previous swing low.";
+      return(false);
+   }
+
+   if(lowShifts[0] <= 3)
+   {
+      reason = "Higher low is too recent; waiting for post-pullback break structure.";
+      return(false);
+   }
+
+   breakLevel = GetHighestHighInShiftRange(symbol, timeframe, 2, lowShifts[0] - 1);
+   stopReference = lows[0];
+   if(breakLevel <= 0.0 || stopReference <= 0.0)
+   {
+      reason = "Could not calculate bullish post-pullback trigger or stop reference.";
+      return(false);
+   }
+
    double closeLast = iClose(symbol, timeframe, 1);
    double closePrev = iClose(symbol, timeframe, 2);
+   double openLast = iOpen(symbol, timeframe, 1);
+   double breakBuffer = GetEntryBreakBufferPips(symbol) * PipSize(symbol);
+   double maxCloseBeyondTrigger = GetEntryMaxCloseBeyondTriggerPips(symbol) * PipSize(symbol);
 
-   if(closeLast < breakLevel && closePrev >= breakLevel)
+   if(EntryRequireBreakCandleDirection && closeLast <= openLast)
    {
-      reason = "Break below most recent higher low confirmed.";
+      reason = "Bullish break candle did not close bullish.";
+      return(false);
+   }
+
+   if(closeLast > breakLevel + breakBuffer && closePrev <= breakLevel)
+   {
+      if((closeLast - breakLevel) > maxCloseBeyondTrigger)
+      {
+         reason = "Bullish break closed too far beyond trigger; entry is late.";
+         return(false);
+      }
+      if(EntryRequireRetestAfterBreak)
+      {
+         StorePendingRetest(symbol, OP_BUY, breakLevel, stopReference, iTime(symbol, timeframe, 1));
+         reason = "Bullish break confirmed; waiting for retest of broken trigger.";
+         return(false);
+      }
+      reason = "Higher-low pullback confirmed; break above post-pullback high.";
       return(true);
    }
 
-   reason = "No fresh break below most recent higher low.";
+   reason = "No fresh break above post-higher-low trigger.";
    return(false);
 }
 
-// Calculates alert-only trigger, market entry, stop loss, take profit, and reward:risk levels.
-void CalculateSuggestedLevels(string symbol, int orderType, double triggerLevel, double marketPrice, double stopReference, LevelInfo &levels)
+// Finds an entry-timeframe lower high and a break below the post-pullback low.
+bool DetectBearishStructureBreak(string symbol, int timeframe, double &breakLevel, double &stopReference, string &reason)
+{
+   if(CheckPendingRetestEntry(symbol, timeframe, OP_SELL, breakLevel, stopReference, reason))
+      return(true);
+
+   double highs[];
+   int highShifts[];
+   int found = GetRecentSwingHighs(symbol, timeframe, 2, highs, highShifts);
+   if(found < 2)
+   {
+      reason = "Not enough entry timeframe swing highs for lower-high pullback structure.";
+      return(false);
+   }
+
+   if(!(highs[0] < highs[1]))
+   {
+      reason = "Entry pullback has not formed a lower high.";
+      return(false);
+   }
+
+   int barsAfterLowerHigh = highShifts[0] - 1;
+   if(barsAfterLowerHigh > EntryMaxBarsAfterPullbackSwing)
+   {
+      reason = "Lower-high trigger is stale; too many bars after pullback swing.";
+      return(false);
+   }
+
+   double minSwingImprovement = GetEntryMinSwingImprovementPips(symbol) * PipSize(symbol);
+   if((highs[1] - highs[0]) < minSwingImprovement)
+   {
+      reason = "Lower high is too marginal versus previous swing high.";
+      return(false);
+   }
+
+   if(highShifts[0] <= 3)
+   {
+      reason = "Lower high is too recent; waiting for post-pullback break structure.";
+      return(false);
+   }
+
+   breakLevel = GetLowestLowInShiftRange(symbol, timeframe, 2, highShifts[0] - 1);
+   stopReference = highs[0];
+   if(breakLevel <= 0.0 || stopReference <= 0.0)
+   {
+      reason = "Could not calculate bearish post-pullback trigger or stop reference.";
+      return(false);
+   }
+
+   double closeLast = iClose(symbol, timeframe, 1);
+   double closePrev = iClose(symbol, timeframe, 2);
+   double openLast = iOpen(symbol, timeframe, 1);
+   double breakBuffer = GetEntryBreakBufferPips(symbol) * PipSize(symbol);
+   double maxCloseBeyondTrigger = GetEntryMaxCloseBeyondTriggerPips(symbol) * PipSize(symbol);
+
+   if(EntryRequireBreakCandleDirection && closeLast >= openLast)
+   {
+      reason = "Bearish break candle did not close bearish.";
+      return(false);
+   }
+
+   if(closeLast < breakLevel - breakBuffer && closePrev >= breakLevel)
+   {
+      if((breakLevel - closeLast) > maxCloseBeyondTrigger)
+      {
+         reason = "Bearish break closed too far beyond trigger; entry is late.";
+         return(false);
+      }
+      if(EntryRequireRetestAfterBreak)
+      {
+         StorePendingRetest(symbol, OP_SELL, breakLevel, stopReference, iTime(symbol, timeframe, 1));
+         reason = "Bearish break confirmed; waiting for retest of broken trigger.";
+         return(false);
+      }
+      reason = "Lower-high pullback confirmed; break below post-pullback low.";
+      return(true);
+   }
+
+   reason = "No fresh break below post-lower-high trigger.";
+   return(false);
+}
+
+// Returns minimum improvement required between entry timeframe swings.
+double GetEntryMinSwingImprovementPips(string symbol)
+{
+   if(IsGoldSymbol(symbol))
+      return(EntryMinSwingImprovementPipsGold);
+   return(EntryMinSwingImprovementPips);
+}
+
+// Returns the close-confirmation buffer beyond the trigger.
+double GetEntryBreakBufferPips(string symbol)
+{
+   if(IsGoldSymbol(symbol))
+      return(EntryBreakBufferPipsGold);
+   return(EntryBreakBufferPips);
+}
+
+// Limits late entries that close too far from the trigger level.
+double GetEntryMaxCloseBeyondTriggerPips(string symbol)
+{
+   if(IsGoldSymbol(symbol))
+      return(EntryMaxCloseBeyondTriggerPipsGold);
+   return(EntryMaxCloseBeyondTriggerPips);
+}
+
+// Saves a valid structure break and waits for a retest before entry.
+void StorePendingRetest(string symbol, int orderType, double triggerLevel, double stopReference, datetime breakTime)
+{
+   int index = GetSymbolIndex(symbol);
+   if(index < 0)
+      return;
+
+   if(orderType == OP_BUY)
+   {
+      g_pendingBuyRetest[index] = true;
+      g_pendingBuyTriggerLevels[index] = triggerLevel;
+      g_pendingBuyStopReferences[index] = stopReference;
+      g_pendingBuyBreakTimes[index] = breakTime;
+   }
+   else if(orderType == OP_SELL)
+   {
+      g_pendingSellRetest[index] = true;
+      g_pendingSellTriggerLevels[index] = triggerLevel;
+      g_pendingSellStopReferences[index] = stopReference;
+      g_pendingSellBreakTimes[index] = breakTime;
+   }
+}
+
+// Confirms entry only after price retests the broken trigger and rejects in trend direction.
+bool CheckPendingRetestEntry(string symbol, int timeframe, int orderType, double &breakLevel, double &stopReference, string &reason)
+{
+   int index = GetSymbolIndex(symbol);
+   if(index < 0 || !EntryRequireRetestAfterBreak)
+      return(false);
+
+   bool active = (orderType == OP_BUY) ? g_pendingBuyRetest[index] : g_pendingSellRetest[index];
+   if(!active)
+      return(false);
+
+   datetime breakTime = (orderType == OP_BUY) ? g_pendingBuyBreakTimes[index] : g_pendingSellBreakTimes[index];
+   int barsSinceBreak = iBarShift(symbol, timeframe, breakTime, false);
+   if(barsSinceBreak < 0 || barsSinceBreak > EntryRetestExpiryBars)
+   {
+      ClearPendingRetest(index, orderType);
+      reason = "Pending retest expired.";
+      return(false);
+   }
+
+   breakLevel = (orderType == OP_BUY) ? g_pendingBuyTriggerLevels[index] : g_pendingSellTriggerLevels[index];
+   stopReference = (orderType == OP_BUY) ? g_pendingBuyStopReferences[index] : g_pendingSellStopReferences[index];
+
+   double tolerance = GetEntryRetestTolerancePips(symbol) * PipSize(symbol);
+   double breakBuffer = GetEntryBreakBufferPips(symbol) * PipSize(symbol);
+   double openLast = iOpen(symbol, timeframe, 1);
+   double closeLast = iClose(symbol, timeframe, 1);
+   double highLast = iHigh(symbol, timeframe, 1);
+   double lowLast = iLow(symbol, timeframe, 1);
+
+   if(orderType == OP_BUY)
+   {
+      bool retested = (lowLast <= breakLevel + tolerance);
+      bool rejected = (closeLast > openLast && closeLast > breakLevel + breakBuffer);
+      if(retested && rejected)
+      {
+         ClearPendingRetest(index, orderType);
+         reason = "Bullish retest held and rejected from trigger.";
+         return(true);
+      }
+
+      reason = "Waiting for bullish retest/rejection of trigger.";
+      return(false);
+   }
+
+   if(orderType == OP_SELL)
+   {
+      bool retested = (highLast >= breakLevel - tolerance);
+      bool rejected = (closeLast < openLast && closeLast < breakLevel - breakBuffer);
+      if(retested && rejected)
+      {
+         ClearPendingRetest(index, orderType);
+         reason = "Bearish retest held and rejected from trigger.";
+         return(true);
+      }
+
+      reason = "Waiting for bearish retest/rejection of trigger.";
+      return(false);
+   }
+
+   return(false);
+}
+
+// Clears a pending retest setup.
+void ClearPendingRetest(int index, int orderType)
+{
+   if(index < 0)
+      return;
+
+   if(orderType == OP_BUY)
+   {
+      g_pendingBuyRetest[index] = false;
+      g_pendingBuyTriggerLevels[index] = 0.0;
+      g_pendingBuyStopReferences[index] = 0.0;
+      g_pendingBuyBreakTimes[index] = 0;
+   }
+   else if(orderType == OP_SELL)
+   {
+      g_pendingSellRetest[index] = false;
+      g_pendingSellTriggerLevels[index] = 0.0;
+      g_pendingSellStopReferences[index] = 0.0;
+      g_pendingSellBreakTimes[index] = 0;
+   }
+}
+
+// Returns tolerance around a broken trigger for retest entries.
+double GetEntryRetestTolerancePips(string symbol)
+{
+   if(IsGoldSymbol(symbol))
+      return(EntryRetestTolerancePipsGold);
+   return(EntryRetestTolerancePips);
+}
+
+// Requires the entry confirmation swing to form in the correct H4 value area.
+bool ValidateH4EntryLocation(string symbol, int orderType, double setupSwingPrice, PullbackInfo &pullback, string &reason)
+{
+   if(!RequireH4PremiumDiscountEntry)
+      return(true);
+
+   double range = pullback.swingHigh - pullback.swingLow;
+   if(range <= 0.0)
+   {
+      reason = "Invalid H4 pullback range for entry location.";
+      return(false);
+   }
+
+   double position = (setupSwingPrice - pullback.swingLow) / range;
+
+   if(orderType == OP_BUY)
+   {
+      if(position <= BuyMaxH4RangePosition)
+      {
+         reason = "BUY higher-low formed in H4 discount/value zone. Position: " + DoubleToString(position, 2);
+         return(true);
+      }
+
+      reason = "BUY higher-low formed too high in the H4 range; poor continuation location. Position: " + DoubleToString(position, 2);
+      return(false);
+   }
+
+   if(orderType == OP_SELL)
+   {
+      if(position >= SellMinH4RangePosition)
+      {
+         reason = "SELL lower-high formed in H4 premium/value zone. Position: " + DoubleToString(position, 2);
+         return(true);
+      }
+
+      reason = "SELL lower-high formed too low in the H4 range; selling into support/exhaustion. Position: " + DoubleToString(position, 2);
+      return(false);
+   }
+
+   reason = "Unsupported H4 entry location direction.";
+   return(false);
+}
+
+// Uses the higher-timeframe pullback swing as the default invalidation point.
+double GetSetupStopReference(int orderType, double entryStopReference, PullbackInfo &pullback)
+{
+   if(!UseH4PullbackStopReference)
+      return(entryStopReference);
+
+   if(orderType == OP_BUY)
+   {
+      if(pullback.swingLow > 0.0)
+         return(MathMin(entryStopReference, pullback.swingLow));
+      return(entryStopReference);
+   }
+
+   if(orderType == OP_SELL)
+   {
+      if(pullback.swingHigh > 0.0)
+         return(MathMax(entryStopReference, pullback.swingHigh));
+      return(entryStopReference);
+   }
+
+   return(entryStopReference);
+}
+
+// Keeps structural TP slightly ahead of the next swing target.
+double GetStructuralTargetBufferPips(string symbol)
+{
+   if(IsGoldSymbol(symbol))
+      return(StructuralTargetBufferPipsGold);
+   return(StructuralTargetBufferPips);
+}
+
+// Calculates trigger, market entry, stop loss, take profit, and reward:risk levels.
+void CalculateSuggestedLevels(string symbol, int orderType, double triggerLevel, double marketPrice, double stopReference, double targetReference, LevelInfo &levels)
 {
    int digits = DigitsForSymbol(symbol);
    double buffer = (IsGoldSymbol(symbol) ? StopBufferPipsGold : StopBufferPips) * PipSize(symbol);
+   double targetBuffer = GetStructuralTargetBufferPips(symbol) * PipSize(symbol);
 
    levels.valid = false;
    levels.reason = "";
@@ -690,7 +1324,19 @@ void CalculateSuggestedLevels(string symbol, int orderType, double triggerLevel,
          levels.reason = "Invalid BUY risk distance.";
          return;
       }
-      levels.takeProfit = NormalizeDouble(levels.entry + (levels.risk * MinRewardRisk), digits);
+
+      if(UseStructuralTakeProfit)
+      {
+         levels.takeProfit = NormalizeDouble(targetReference - targetBuffer, digits);
+         if(levels.takeProfit <= levels.entry)
+         {
+            levels.reason = "BUY structural target is not above entry.";
+            return;
+         }
+      }
+      else
+         levels.takeProfit = NormalizeDouble(levels.entry + (levels.risk * MinRewardRisk), digits);
+
       levels.reward = levels.takeProfit - levels.entry;
    }
    else if(orderType == OP_SELL)
@@ -702,7 +1348,19 @@ void CalculateSuggestedLevels(string symbol, int orderType, double triggerLevel,
          levels.reason = "Invalid SELL risk distance.";
          return;
       }
-      levels.takeProfit = NormalizeDouble(levels.entry - (levels.risk * MinRewardRisk), digits);
+
+      if(UseStructuralTakeProfit)
+      {
+         levels.takeProfit = NormalizeDouble(targetReference + targetBuffer, digits);
+         if(levels.takeProfit >= levels.entry)
+         {
+            levels.reason = "SELL structural target is not below entry.";
+            return;
+         }
+      }
+      else
+         levels.takeProfit = NormalizeDouble(levels.entry - (levels.risk * MinRewardRisk), digits);
+
       levels.reward = levels.entry - levels.takeProfit;
    }
    else
@@ -780,12 +1438,161 @@ double GetAlertMarketPrice(string symbol, int orderType)
    return(0.0);
 }
 
+// Enables real execution only when explicitly allowed, with tester execution separately controlled.
+bool ShouldExecuteTrades()
+{
+   if(IsTesting())
+      return(TesterEnableTradeExecution);
+   return(EnableTradeExecution);
+}
+
+// Places a market order for Strategy Tester/demo evaluation after a valid setup.
+bool ExecuteSetupTrade(string symbol, int orderType, LevelInfo &levels)
+{
+   if(!ShouldExecuteTrades())
+   {
+      LogSetupStatus(symbol, "TRADE", "SKIPPED", "Trade execution disabled.");
+      return(false);
+   }
+
+   if(AllowOnlyOneOpenTradePerSymbol && HasOpenTrade(symbol))
+   {
+      LogSetupStatus(symbol, "TRADE", "SKIPPED", "Existing open trade found for symbol and magic number.");
+      return(false);
+   }
+
+   if(!ValidateTradeStops(symbol, orderType, levels))
+      return(false);
+
+   RefreshRates();
+
+   int digits = DigitsForSymbol(symbol);
+   double lots = NormalizeTradeVolume(symbol, FixedLotSize);
+   double price = 0.0;
+   color arrowColor = clrNONE;
+
+   if(orderType == OP_BUY)
+   {
+      price = NormalizeDouble(MarketInfo(symbol, MODE_ASK), digits);
+      arrowColor = clrLime;
+   }
+   else if(orderType == OP_SELL)
+   {
+      price = NormalizeDouble(MarketInfo(symbol, MODE_BID), digits);
+      arrowColor = clrRed;
+   }
+   else
+      return(false);
+
+   int ticket = OrderSend(symbol, orderType, lots, price, SlippagePoints(symbol), levels.stopLoss, levels.takeProfit, TradeComment, MagicNumber, 0, arrowColor);
+   if(ticket < 0)
+   {
+      int errorCode = GetLastError();
+      LogSetupStatus(symbol, "TRADE", "FAILED", "OrderSend failed. Error: " + IntegerToString(errorCode));
+      ResetLastError();
+      return(false);
+   }
+
+   LogSetupStatus(symbol, "TRADE", "OPENED", "Ticket " + IntegerToString(ticket) + " | Lots " + DoubleToString(lots, 2) + " | Price " + DoubleToString(price, digits));
+   return(true);
+}
+
+// Keeps tester/demo orders from stacking when the user wants one position per symbol.
+bool HasOpenTrade(string symbol)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+
+      if(OrderSymbol() == symbol && OrderMagicNumber() == MagicNumber)
+         return(true);
+   }
+   return(false);
+}
+
+// Converts slippage pips to broker points.
+int SlippagePoints(string symbol)
+{
+   double point = MarketInfo(symbol, MODE_POINT);
+   if(point <= 0.0)
+      return(0);
+   return((int)MathRound((SlippagePips * PipSize(symbol)) / point));
+}
+
+// Normalizes fixed lots to broker min/max/step.
+double NormalizeTradeVolume(string symbol, double requestedLots)
+{
+   double minLot = MarketInfo(symbol, MODE_MINLOT);
+   double maxLot = MarketInfo(symbol, MODE_MAXLOT);
+   double lotStep = MarketInfo(symbol, MODE_LOTSTEP);
+
+   if(lotStep <= 0.0)
+      lotStep = 0.01;
+
+   double lots = requestedLots;
+   if(lots < minLot)
+      lots = minLot;
+   if(lots > maxLot)
+      lots = maxLot;
+
+   lots = MathFloor(lots / lotStep) * lotStep;
+   if(lots < minLot)
+      lots = minLot;
+
+   return(NormalizeDouble(lots, 2));
+}
+
+// Rejects orders when SL/TP would violate the broker's minimum stop distance.
+bool ValidateTradeStops(string symbol, int orderType, LevelInfo &levels)
+{
+   double point = MarketInfo(symbol, MODE_POINT);
+   double stopDistance = MarketInfo(symbol, MODE_STOPLEVEL) * point;
+   double ask = MarketInfo(symbol, MODE_ASK);
+   double bid = MarketInfo(symbol, MODE_BID);
+
+   if(point <= 0.0)
+   {
+      LogSetupStatus(symbol, "TRADE", "REJECTED", "Invalid broker point size.");
+      return(false);
+   }
+
+   if(orderType == OP_BUY)
+   {
+      if(levels.stopLoss >= bid || levels.takeProfit <= ask)
+      {
+         LogSetupStatus(symbol, "TRADE", "REJECTED", "BUY SL/TP are on the wrong side of market price.");
+         return(false);
+      }
+      if(stopDistance > 0.0 && (ask - levels.stopLoss < stopDistance || levels.takeProfit - ask < stopDistance))
+      {
+         LogSetupStatus(symbol, "TRADE", "REJECTED", "BUY SL/TP violate broker stop level.");
+         return(false);
+      }
+   }
+   else if(orderType == OP_SELL)
+   {
+      if(levels.stopLoss <= ask || levels.takeProfit >= bid)
+      {
+         LogSetupStatus(symbol, "TRADE", "REJECTED", "SELL SL/TP are on the wrong side of market price.");
+         return(false);
+      }
+      if(stopDistance > 0.0 && (levels.stopLoss - bid < stopDistance || bid - levels.takeProfit < stopDistance))
+      {
+         LogSetupStatus(symbol, "TRADE", "REJECTED", "SELL SL/TP violate broker stop level.");
+         return(false);
+      }
+   }
+
+   return(true);
+}
+
 // Sends configured alert channels.
 void SendSetupAlert(string symbol, string direction, string trendDirection, string entryTf, LevelInfo &levels)
 {
    int digits = DigitsForSymbol(symbol);
    datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
-   string message = EA_NAME + " v1.1 ALERT-ONLY\n"
+   string message = EA_NAME + " v1.25 SETUP\n"
       + "Symbol: " + symbol + "\n"
       + "Setup type: " + direction + "\n"
       + "Daily trend direction: " + trendDirection + "\n"
