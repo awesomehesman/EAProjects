@@ -1,8 +1,8 @@
 #property strict
 #property copyright "stayTRU"
 #property link      ""
-#property version   "1.29"
-#property description "stayTRU Trend Continuation Framework - Version 1.29 Major Pairs Scanner and Tester Execution"
+#property version   "1.30"
+#property description "stayTRU Trend Continuation Framework - Version 1.30 Major Pairs Balanced Scanner and Tester Execution"
 
 input bool   UseSessionFilter           = true;
 input bool   TesterIgnoreSessionFilter  = true;
@@ -10,25 +10,25 @@ input int    StartHour                  = 9;
 input int    EndHour                    = 18;
 input int    ServerToSASTOffsetHours    = 0;
 input int    SwingLookback              = 3;
-input int    TrendSwingCount            = 3;
+input int    TrendSwingCount            = 2;
 input bool   UseStrictDailyTrendSequence = false;
 input bool   H4RequireConfirmedPullbackSwing = false;
 input bool   TesterRelaxH4PullbackConfirmation = true;
 input bool   H4RequireTrendRejectionCandle = true;
 input bool   H4RejectionMustBreakPreviousCandle = false;
-input int    H4RejectionLookbackBars   = 3;
+input int    H4RejectionLookbackBars   = 5;
 input double H4RejectionBreakBufferPips = 1.0;
-input double H4MinPullbackPips          = 10.0;
+input double H4MinPullbackPips          = 8.0;
 input bool   UseH1StructureFilterForFastSymbols = false;
 input bool   UseM15EntryForSlowSymbols  = false;
-input int    EntryMaxBarsAfterPullbackSwing = 12;
-input double EntryMinSwingImprovementPips = 3.0;
+input int    EntryMaxBarsAfterPullbackSwing = 18;
+input double EntryMinSwingImprovementPips = 2.0;
 input double EntryBreakBufferPips       = 0.5;
-input double EntryMaxCloseBeyondTriggerPips = 4.0;
+input double EntryMaxCloseBeyondTriggerPips = 6.0;
 input bool   EntryRequireBreakCandleDirection = true;
 input bool   EntryRequireRetestAfterBreak = true;
-input int    EntryRetestExpiryBars      = 8;
-input double EntryRetestTolerancePips   = 1.5;
+input int    EntryRetestExpiryBars      = 12;
+input double EntryRetestTolerancePips   = 2.0;
 input double MaxSpreadPips              = 3.0;
 input bool   TesterUseSpreadOverride    = true;
 input double TesterMaxSpreadPips        = 5.0;
@@ -118,7 +118,7 @@ int OnInit()
 {
    LoadSymbolsToScan();
    ApplyChartTheme();
-   Print(EA_NAME, " v1.29 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
+   Print(EA_NAME, " v1.30 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
    if(IsTesting() && UseSessionFilter && TesterIgnoreSessionFilter)
       Print(EA_NAME, " | Strategy Tester mode: session filter bypassed because TesterIgnoreSessionFilter=true.");
    return(INIT_SUCCEEDED);
@@ -1596,7 +1596,7 @@ void SendSetupAlert(string symbol, string direction, string trendDirection, stri
 {
    int digits = DigitsForSymbol(symbol);
    datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
-   string message = EA_NAME + " v1.29 SETUP\n"
+   string message = EA_NAME + " v1.30 SETUP\n"
       + "Symbol: " + symbol + "\n"
       + "Setup type: " + direction + "\n"
       + "Daily trend direction: " + trendDirection + "\n"
