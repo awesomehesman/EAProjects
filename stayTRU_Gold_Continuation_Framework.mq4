@@ -1,8 +1,8 @@
 #property strict
 #property copyright "stayTRU"
 #property link      ""
-#property version   "1.29"
-#property description "stayTRU Trend Continuation Framework - Version 1.29 Major Pairs Scanner and Tester Execution"
+#property version   "1.00"
+#property description "stayTRU Gold Continuation Framework - Version 1.00 Gold-Only Scanner and Tester Execution"
 
 input bool   UseSessionFilter           = true;
 input bool   TesterIgnoreSessionFilter  = true;
@@ -17,38 +17,36 @@ input bool   TesterRelaxH4PullbackConfirmation = true;
 input bool   H4RequireTrendRejectionCandle = true;
 input bool   H4RejectionMustBreakPreviousCandle = false;
 input int    H4RejectionLookbackBars   = 3;
-input double H4RejectionBreakBufferPips = 1.0;
-input double H4MinPullbackPips          = 10.0;
-input bool   UseH1StructureFilterForFastSymbols = false;
-input bool   UseM15EntryForSlowSymbols  = false;
+input double H4RejectionBreakBufferPips = 10.0;
+input double H4MinPullbackPips          = 100.0;
 input int    EntryMaxBarsAfterPullbackSwing = 12;
-input double EntryMinSwingImprovementPips = 3.0;
-input double EntryBreakBufferPips       = 0.5;
-input double EntryMaxCloseBeyondTriggerPips = 4.0;
+input double EntryMinSwingImprovementPips = 30.0;
+input double EntryBreakBufferPips       = 5.0;
+input double EntryMaxCloseBeyondTriggerPips = 40.0;
 input bool   EntryRequireBreakCandleDirection = true;
 input bool   EntryRequireRetestAfterBreak = true;
 input int    EntryRetestExpiryBars      = 8;
-input double EntryRetestTolerancePips   = 1.5;
-input double MaxSpreadPips              = 3.0;
+input double EntryRetestTolerancePips   = 15.0;
+input double MaxSpreadPips              = 50.0;
 input bool   TesterUseSpreadOverride    = true;
-input double TesterMaxSpreadPips        = 5.0;
-input double StopBufferPips             = 5.0;
-input bool   UseH4PullbackStopReference = true;
+input double TesterMaxSpreadPips        = 80.0;
+input double StopBufferPips             = 50.0;
+input bool   UseH4PullbackStopReference = false;
 input bool   UseMaxRiskDistanceFilter   = true;
-input double MaxRiskPips                = 0.0;
+input double MaxRiskPips                = 250.0;
 input double MinRewardRisk              = 2.5;
 input bool   UseStructuralTakeProfit    = true;
-input double StructuralTargetBufferPips = 2.0;
+input double StructuralTargetBufferPips = 20.0;
 input bool   RequireH4PremiumDiscountEntry = true;
 input double BuyMaxH4RangePosition      = 0.45;
 input double SellMinH4RangePosition     = 0.55;
 input bool   EnableTradeExecution       = false;
 input bool   TesterEnableTradeExecution = true;
-input double FixedLotSize               = 0.10;
+input double FixedLotSize               = 0.01;
 input double SlippagePips               = 2.0;
-input int    MagicNumber                = 27052026;
+input int    MagicNumber                = 27052027;
 input bool   AllowOnlyOneOpenTradePerSymbol = true;
-input string TradeComment               = "stayTRU TCF";
+input string TradeComment               = "stayTRU GOLD";
 input bool   EnablePopupAlert           = true;
 input bool   EnablePushNotification     = true;
 input bool   EnableEmailAlert           = false;
@@ -56,14 +54,14 @@ input bool   EnableSoundAlert           = true;
 input string SoundFile                  = "alert.wav";
 input bool   ScanOnlyCurrentChartSymbol = true;
 input bool   TesterScanOnlyCurrentSymbol = true;
-input string SymbolsToScan              = "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD";
+input string GoldSymbolToScan           = "XAUUSD";
 input bool   ApplyCleanChartTheme       = true;
 input color  BullishCandleColor         = clrLime;
 input color  BearishCandleColor         = clrRed;
 input color  ChartBackgroundColor       = clrBlack;
 input color  ChartForegroundColor       = clrWhite;
 
-string EA_NAME = "stayTRU Trend Continuation Framework - Major Pairs";
+string EA_NAME = "stayTRU Gold Continuation Framework";
 
 struct TrendInfo
 {
@@ -118,7 +116,7 @@ int OnInit()
 {
    LoadSymbolsToScan();
    ApplyChartTheme();
-   Print(EA_NAME, " v1.29 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
+   Print(EA_NAME, " v1.00 initialized. Gold-only scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
    if(IsTesting() && UseSessionFilter && TesterIgnoreSessionFilter)
       Print(EA_NAME, " | Strategy Tester mode: session filter bypassed because TesterIgnoreSessionFilter=true.");
    return(INIT_SUCCEEDED);
@@ -184,7 +182,7 @@ bool ShouldRequireH4ConfirmedPullbackSwing()
    return(H4RequireConfirmedPullbackSwing);
 }
 
-// Loads and normalizes symbols from inputs.
+// Loads the current chart symbol or the configured Gold symbol.
 void LoadSymbolsToScan()
 {
    if(ShouldScanOnlyCurrentSymbol())
@@ -194,21 +192,8 @@ void LoadSymbolsToScan()
    }
    else
    {
-      string parts[];
-      ushort comma = StringGetCharacter(",", 0);
-      int count = StringSplit(SymbolsToScan, comma, parts);
-      ArrayResize(g_symbols, 0);
-
-      for(int i = 0; i < count; i++)
-      {
-         string item = TrimString(parts[i]);
-         if(item == "")
-         continue;
-
-         int size = ArraySize(g_symbols);
-         ArrayResize(g_symbols, size + 1);
-         g_symbols[size] = ResolveBrokerSymbol(item);
-      }
+      ArrayResize(g_symbols, 1);
+      g_symbols[0] = ResolveBrokerSymbol(GoldSymbolToScan);
    }
 
    ArrayResize(g_lastBuyAlertTimes, ArraySize(g_symbols));
@@ -267,9 +252,9 @@ void ScanSymbol(string symbol)
    if(!ShouldScanNewCandle(symbol, entryCandleTime))
       return;
 
-   if(!IsSupportedMajorSymbol(symbol))
+   if(!IsGoldSymbol(symbol))
    {
-      LogSetupStatus(symbol, "INIT", "REJECTED", "Major-pairs EA only supports EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, NZDUSD, and USDCAD.");
+      LogSetupStatus(symbol, "INIT", "REJECTED", "Gold-only EA only supports XAUUSD or broker symbols containing GOLD.");
       return;
    }
 
@@ -412,30 +397,16 @@ bool IsWithinTradingSession()
    return(hour >= StartHour || hour < EndHour);
 }
 
-// Fast symbols confirm on M15; slow symbols confirm on H1 unless an override is enabled.
+// Kept for shared structure helpers; Gold entries are always confirmed on M15.
 bool IsFastSymbol(string symbol)
 {
-   string base = StripSymbolSuffix(symbol);
-   return(base == "EURUSD" || base == "USDJPY" || base == "USDCHF" || base == "AUDUSD");
-}
-
-// Keeps this EA focused on supported major currency pairs only.
-bool IsSupportedMajorSymbol(string symbol)
-{
-   string base = StripSymbolSuffix(symbol);
-   return(base == "EURUSD" || base == "GBPUSD" || base == "USDJPY" || base == "USDCHF" || base == "AUDUSD" || base == "NZDUSD" || base == "USDCAD");
+   return(false);
 }
 
 // Returns the entry confirmation timeframe for the symbol.
 int GetEntryTimeframe(string symbol)
 {
-   if(IsFastSymbol(symbol))
-      return(PERIOD_M15);
-
-   if(UseM15EntryForSlowSymbols)
-      return(PERIOD_M15);
-
-   return(PERIOD_H1);
+   return(PERIOD_M15);
 }
 
 // Returns current spread in pip units.
@@ -681,28 +652,11 @@ void GetDailyTrend(string symbol, TrendInfo &trend)
    trend.description = "Unclear - Daily swing sequence is mixed and no dominant latest break is confirmed.";
 }
 
-// Requires H1 structure agreement for fast-symbol M15 entries.
+// Gold uses Daily and H4 for bias/context, then M15 for entry confirmation.
 bool ValidateIntermediateStructure(string symbol, int trendDirection)
 {
-   if(!UseH1StructureFilterForFastSymbols)
-   {
-      LogSetupStatus(symbol, "H1 FILTER", "SKIPPED", "H1 agreement filter disabled; H4 pullback and entry timeframe will confirm continuation.");
-      return(true);
-   }
-
-   if(!IsFastSymbol(symbol))
-      return(true);
-
-   string reason = "";
-   int h1Trend = GetStructureTrend(symbol, PERIOD_H1, 2, reason);
-   if(h1Trend == trendDirection)
-   {
-      LogSetupStatus(symbol, "H1 FILTER", "VALID", reason);
-      return(true);
-   }
-
-   LogSetupStatus(symbol, "H1 FILTER", "REJECTED", "H1 structure does not agree with Daily trend. " + reason);
-   return(false);
+   LogSetupStatus(symbol, "H1 FILTER", "SKIPPED", "Gold-only EA uses Daily/H4 context and M15 entry confirmation.");
+   return(true);
 }
 
 // Returns basic swing-structure direction for any timeframe.
@@ -1596,7 +1550,7 @@ void SendSetupAlert(string symbol, string direction, string trendDirection, stri
 {
    int digits = DigitsForSymbol(symbol);
    datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
-   string message = EA_NAME + " v1.29 SETUP\n"
+   string message = EA_NAME + " v1.00 SETUP\n"
       + "Symbol: " + symbol + "\n"
       + "Setup type: " + direction + "\n"
       + "Daily trend direction: " + trendDirection + "\n"
@@ -1762,6 +1716,9 @@ string ResolveBrokerSymbol(string requestedSymbol)
 // Converts broker precision into a pip size.
 double PipSize(string symbol)
 {
+   if(IsGoldSymbol(symbol))
+      return(0.1);
+
    int digits = DigitsForSymbol(symbol);
    double point = MarketInfo(symbol, MODE_POINT);
    if(digits == 3 || digits == 5)
@@ -1775,18 +1732,25 @@ int DigitsForSymbol(string symbol)
    return((int)MarketInfo(symbol, MODE_DIGITS));
 }
 
-// Removes common suffixes by matching known supported major symbols.
+// Detects XAUUSD even with a broker suffix.
+bool IsGoldSymbol(string symbol)
+{
+   string upper = symbol;
+   StringToUpper(upper);
+   return(StringFind(upper, "XAUUSD", 0) >= 0 || StringFind(upper, "GOLD", 0) >= 0);
+}
+
+// Removes common suffixes by matching known Gold symbols.
 string StripSymbolSuffix(string symbol)
 {
    string upper = symbol;
    StringToUpper(upper);
-   string bases[7] = {"EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD"};
 
-   for(int i = 0; i < 7; i++)
-   {
-      if(StringFind(upper, bases[i], 0) == 0)
-         return(bases[i]);
-   }
+   if(StringFind(upper, "XAUUSD", 0) == 0)
+      return("XAUUSD");
+   if(StringFind(upper, "GOLD", 0) == 0)
+      return("GOLD");
+
    return(upper);
 }
 
