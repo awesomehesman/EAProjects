@@ -1,8 +1,8 @@
 #property strict
 #property copyright "stayTRU"
 #property link      ""
-#property version   "1.25"
-#property description "stayTRU Trend Continuation Framework - Version 1.25 Scanner and Tester Execution"
+#property version   "1.26"
+#property description "stayTRU Trend Continuation Framework - Version 1.26 Scanner and Tester Execution"
 
 input bool   UseSessionFilter           = true;
 input bool   TesterIgnoreSessionFilter  = true;
@@ -16,6 +16,7 @@ input bool   H4RequireConfirmedPullbackSwing = false;
 input bool   TesterRelaxH4PullbackConfirmation = true;
 input bool   H4RequireTrendRejectionCandle = true;
 input bool   H4RejectionMustBreakPreviousCandle = false;
+input int    H4RejectionLookbackBars   = 3;
 input double H4RejectionBreakBufferPips = 1.0;
 input double H4RejectionBreakBufferPipsGold = 10.0;
 input double H4MinPullbackPips          = 10.0;
@@ -124,7 +125,7 @@ int OnInit()
 {
    LoadSymbolsToScan();
    ApplyChartTheme();
-   Print(EA_NAME, " v1.25 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
+   Print(EA_NAME, " v1.26 initialized. Scanner mode. Symbols loaded: ", ArraySize(g_symbols), " | Trade execution: ", ShouldExecuteTrades() ? "enabled" : "disabled");
    if(IsTesting() && UseSessionFilter && TesterIgnoreSessionFilter)
       Print(EA_NAME, " | Strategy Tester mode: session filter bypassed because TesterIgnoreSessionFilter=true.");
    return(INIT_SUCCEEDED);
@@ -848,68 +849,68 @@ void ValidateH4Pullback(string symbol, TrendInfo &trend, PullbackInfo &pullback)
    }
 }
 
-// Requires the last closed H4 candle to reject the pullback back in trend direction.
+// Requires a recent closed H4 candle to reject the pullback back in trend direction.
 bool ValidateH4TrendRejection(string symbol, int orderType, string &reason)
 {
    if(!H4RequireTrendRejectionCandle)
       return(true);
 
-   double closeLast = iClose(symbol, PERIOD_H4, 1);
-   double openLast = iOpen(symbol, PERIOD_H4, 1);
-   double highLast = iHigh(symbol, PERIOD_H4, 1);
-   double lowLast = iLow(symbol, PERIOD_H4, 1);
-   double prevHigh = iHigh(symbol, PERIOD_H4, 2);
-   double prevLow = iLow(symbol, PERIOD_H4, 2);
+   int lookbackBars = MathMax(H4RejectionLookbackBars, 1);
    double buffer = (IsGoldSymbol(symbol) ? H4RejectionBreakBufferPipsGold : H4RejectionBreakBufferPips) * PipSize(symbol);
-   double candleRange = highLast - lowLast;
 
-   if(candleRange <= 0.0)
+   for(int shift = 1; shift <= lookbackBars; shift++)
    {
-      reason = "H4 rejection candle has invalid range.";
-      return(false);
+      double closeBar = iClose(symbol, PERIOD_H4, shift);
+      double openBar = iOpen(symbol, PERIOD_H4, shift);
+      double highBar = iHigh(symbol, PERIOD_H4, shift);
+      double lowBar = iLow(symbol, PERIOD_H4, shift);
+      double prevHigh = iHigh(symbol, PERIOD_H4, shift + 1);
+      double prevLow = iLow(symbol, PERIOD_H4, shift + 1);
+      double candleRange = highBar - lowBar;
+
+      if(candleRange <= 0.0)
+         continue;
+
+      if(orderType == OP_BUY)
+      {
+         bool bullishCandle = (closeBar > openBar);
+         bool bullishClosesStrong = (closeBar >= lowBar + (candleRange * 0.60));
+         bool bullishBreaksPrevious = (closeBar > prevHigh + buffer);
+
+         if(bullishCandle && (bullishClosesStrong || bullishBreaksPrevious))
+         {
+            if(H4RejectionMustBreakPreviousCandle && !bullishBreaksPrevious)
+               continue;
+
+            reason = "Recent H4 bullish rejection confirmed within " + IntegerToString(lookbackBars) + " closed H4 candles.";
+            return(true);
+         }
+      }
+
+      if(orderType == OP_SELL)
+      {
+         bool bearishCandle = (closeBar < openBar);
+         bool bearishClosesStrong = (closeBar <= highBar - (candleRange * 0.60));
+         bool bearishBreaksPrevious = (closeBar < prevLow - buffer);
+
+         if(bearishCandle && (bearishClosesStrong || bearishBreaksPrevious))
+         {
+            if(H4RejectionMustBreakPreviousCandle && !bearishBreaksPrevious)
+               continue;
+
+            reason = "Recent H4 bearish rejection confirmed within " + IntegerToString(lookbackBars) + " closed H4 candles.";
+            return(true);
+         }
+      }
    }
 
    if(orderType == OP_BUY)
-   {
-      bool bullishCandle = (closeLast > openLast);
-      bool closesStrong = (closeLast >= lowLast + (candleRange * 0.60));
-      bool breaksPrevious = (closeLast > prevHigh + buffer);
+      reason = "H4 pullback valid, but no recent bullish H4 rejection found within " + IntegerToString(lookbackBars) + " closed H4 candles.";
+   else if(orderType == OP_SELL)
+      reason = "H4 pullback valid, but no recent bearish H4 rejection found within " + IntegerToString(lookbackBars) + " closed H4 candles.";
+   else
+      reason = "Unsupported H4 rejection direction.";
 
-      if(bullishCandle && (closesStrong || breaksPrevious))
-      {
-         if(H4RejectionMustBreakPreviousCandle && !breaksPrevious)
-         {
-            reason = "H4 bullish rejection found, but it did not break previous H4 high.";
-            return(false);
-         }
-         return(true);
-      }
-
-      reason = "H4 pullback valid, but last H4 candle did not reject bullishly from the pullback.";
-      return(false);
-   }
-
-   if(orderType == OP_SELL)
-   {
-      bool bearishCandle = (closeLast < openLast);
-      bool closesStrong = (closeLast <= highLast - (candleRange * 0.60));
-      bool breaksPrevious = (closeLast < prevLow - buffer);
-
-      if(bearishCandle && (closesStrong || breaksPrevious))
-      {
-         if(H4RejectionMustBreakPreviousCandle && !breaksPrevious)
-         {
-            reason = "H4 bearish rejection found, but it did not break previous H4 low.";
-            return(false);
-         }
-         return(true);
-      }
-
-      reason = "H4 pullback valid, but last H4 candle did not reject bearishly from the pullback.";
-      return(false);
-   }
-
-   reason = "Unsupported H4 rejection direction.";
    return(false);
 }
 
@@ -1592,7 +1593,7 @@ void SendSetupAlert(string symbol, string direction, string trendDirection, stri
 {
    int digits = DigitsForSymbol(symbol);
    datetime sastTime = TimeCurrent() + (ServerToSASTOffsetHours * 3600);
-   string message = EA_NAME + " v1.25 SETUP\n"
+   string message = EA_NAME + " v1.26 SETUP\n"
       + "Symbol: " + symbol + "\n"
       + "Setup type: " + direction + "\n"
       + "Daily trend direction: " + trendDirection + "\n"
